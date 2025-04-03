@@ -1,0 +1,6 @@
+__pycache__
+logs
+signals
+my_ve
+*.png
+.env
