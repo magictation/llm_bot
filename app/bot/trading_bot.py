@@ -91,7 +91,7 @@ class TradingBot:
         if self.llm_analyzer:
             # Prepare data for LLM
             csv_data = TechnicalAnalyzer.prepare_data_for_llm(df)
-            
+
             # Get LLM analysis
             llm_analysis = self.llm_analyzer.analyze_market_data(
                 csv_data=csv_data,
@@ -139,29 +139,46 @@ class TradingBot:
             # Get current price
             current_price = self.data_fetcher.get_live_price(self.symbol)
             
-            # Check if signal has changed or if it's a significant update
-            signal_changed = signal != self.last_signal
-            high_confidence = llm_analysis['confidence'] > 80
+            # Enhanced signal processing
+            confidence = llm_analysis.get('confidence', 0)
+            llm_signal = llm_analysis.get('signal', 'NEUTRAL')
             
-            if signal_changed or (signal != "NEUTRAL" and high_confidence):
-                # Update state
-                self.last_signal = signal
-                self.last_signal_price = current_price
-                self.last_signal_time = datetime.datetime.now()
+            logger.info(f"LLM Analysis: Signal={llm_signal}, Confidence={confidence}%")
+            
+            # Modify the signal processing logic
+            is_significant_signal = (
+                confidence >= 50 and  # Confidence threshold
+                (llm_signal in ["LONG", "SHORT"])  # Meaningful signal
+            )
+            
+            # Send alert if signal is significant
+            if is_significant_signal:
+                # Initialize notification manager
+                notification_manager = NotificationManager()
                 
-                # Log signal
-                logger.info(f"Signal generated: {signal} at ${current_price:.2f}")
+                # Log the signal details
+                logger.info(f"Sending notifications for signal: {llm_signal} at ${current_price:.2f}")
                 
-                # Send alert
-                NotificationManager.console_alert(signal, current_price, llm_analysis)
+                # Send console alert
+                notification_manager.console_alert(llm_signal, current_price, llm_analysis)
+                
+                # Send Telegram alert
+                notification_manager.telegram_alert(llm_signal, current_price, llm_analysis)
+                
+                # Update last signal
+                self.last_signal = llm_signal
                 
                 # Save signal data for reference
-                self.save_signal_data(df, llm_analysis, signal, current_price)
+                self.save_signal_data(df, llm_analysis, llm_signal, current_price)
             else:
-                logger.info(f"No new signals. Current status: {signal} (Confidence: {llm_analysis['confidence']}%)")
+                # Log why no signal was sent
+                logger.info(f"No alert sent. Signal: {llm_signal}, Confidence: {confidence}%")
                 
         except Exception as e:
             logger.error(f"Error checking for signals: {e}")
+            # Log full traceback for debugging
+            import traceback
+            traceback.print_exc()
     
     def save_signal_data(self, df: pd.DataFrame, analysis: Dict, signal: str, price: float):
         """

@@ -6,6 +6,7 @@ import os
 import json
 from typing import Dict
 import pandas as pd
+import io  # Import io instead of pandas.StringIO
 import google.generativeai as genai
 from app.config import logger
 
@@ -19,14 +20,21 @@ class LLMAnalyzer:
         Args:
             llm_api_key: API key for the LLM service
         """
-        # Clear any existing environment variable
+        # Prioritize the passed API key over environment variables
+        api_key = llm_api_key or os.getenv('GEMINI_API_KEY') or os.getenv('LLM_API_KEY')
+        
+        if not api_key:
+            raise ValueError("No API key provided for LLM")
+        
+        # Clear any existing environment variable to ensure fresh configuration
         if "GEMINI_API_KEY" in os.environ:
             del os.environ["GEMINI_API_KEY"]
-            logger.info("Cleared existing GEMINI_API_KEY from environment")
-            
-        self.api_key = llm_api_key
+        
+        # Explicitly set the API key
+        os.environ["GEMINI_API_KEY"] = api_key
+        
         # Initialize Google AI client
-        genai.configure(api_key=llm_api_key)
+        genai.configure(api_key=api_key)
         # Use the gemma-3-27b-it model
         self.model_name = "gemma-3-27b-it"
         logger.info(f"Initialized LLM Analyzer with model: {self.model_name}")
@@ -115,7 +123,7 @@ Recent lows: {', '.join([f"${x:.2f}" for x in data_summary['recent_lows']])}
         """
         try:
             # Convert CSV to DataFrame
-            df = pd.read_csv(pd.StringIO(csv_data))
+            df = pd.read_csv(io.StringIO(csv_data))
             
             # Prepare summary data instead of using raw CSV
             data_summary = self.prepare_summary_data(df)
