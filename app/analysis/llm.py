@@ -108,8 +108,9 @@ Recent lows: {', '.join([f"${x:.2f}" for x in data_summary['recent_lows']])}
 """
     
     def analyze_market_data(self, csv_data: str, 
-                          current_price: float, 
-                          timeframe: str) -> Dict:
+                        current_price: float, 
+                        timeframe: str,
+                        multi_timeframe_data: str = None) -> Dict:
         """
         Send market data to LLM for analysis and receive trading signals
         
@@ -117,6 +118,7 @@ Recent lows: {', '.join([f"${x:.2f}" for x in data_summary['recent_lows']])}
             csv_data: CSV string of market data
             current_price: Current price of the asset
             timeframe: Timeframe of the analysis (e.g., '1h', '4h')
+            multi_timeframe_data: Optional multi-timeframe analysis data
             
         Returns:
             Dictionary with LLM's analysis and recommendations
@@ -131,6 +133,14 @@ Recent lows: {', '.join([f"${x:.2f}" for x in data_summary['recent_lows']])}
             # Format data in a more readable way
             formatted_summary = self.format_data_summary(data_summary)
             
+            # Add multi-timeframe data if available
+            multi_timeframe_section = ""
+            if multi_timeframe_data:
+                multi_timeframe_section = f"""
+MULTI-TIMEFRAME ANALYSIS:
+{multi_timeframe_data}
+    """
+            
             # Create an optimized prompt for gemma-3-27b-it
             prompt = f"""
 You are a professional cryptocurrency trader analyzing Bitcoin price data for the {timeframe} timeframe.
@@ -138,24 +148,25 @@ You are a professional cryptocurrency trader analyzing Bitcoin price data for th
 Here is the current market data and technical indicators:
 
 {formatted_summary}
+{multi_timeframe_section}
 
 Based on this data, please provide a trading analysis in the following JSON format:
 
 ```json
 {{
-  "market_condition": "bullish/bearish/neutral with brief explanation",
-  "signal": "LONG/SHORT/NEUTRAL",
-  "confidence": 0-100,
-  "support_levels": [list of prices],
-  "resistance_levels": [list of prices],
-  "stop_loss": price,
-  "take_profit": [list of target prices],
-  "risk_reward_ratio": number,
-  "reasoning": "brief explanation of your analysis"
+"market_condition": "bullish/bearish/neutral with brief explanation",
+"signal": "LONG/SHORT/NEUTRAL",
+"confidence": 0-100,
+"support_levels": [list of prices],
+"resistance_levels": [list of prices],
+"stop_loss": price,
+"take_profit": [list of target prices],
+"risk_reward_ratio": number,
+"reasoning": "brief explanation of your analysis"
 }}
-```
+    ```
 
-The JSON should only contain these fields and be properly formatted.
+    The JSON should only contain these fields and be properly formatted.
             """
             
             # Create a model instance with the current API

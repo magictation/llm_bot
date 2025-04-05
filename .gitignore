@@ -1,6 +1,7 @@
 __pycache__
 logs
 signals
+backtest_results
 my_ve
 *.png
 .env

@@ -5,7 +5,7 @@ import os
 import time
 import json
 import datetime
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List, Optional
 import pandas as pd
 import matplotlib.pyplot as plt
 import schedule
@@ -16,8 +16,10 @@ from rich.table import Table
 from app.config import logger
 from app.data.binance_client import BinanceDataFetcher
 from app.analysis.technical import TechnicalAnalyzer
-from app.analysis.llm import LLMAnalyzer
 from app.notification.alerts import NotificationManager
+
+# These imports will only be used conditionally, so we don't need to have them at the top level
+# They'll be imported within the methods that use them when those features are enabled
 
 console = Console()
 
@@ -39,7 +41,20 @@ class TradingBot:
         # Initialize components - using Binance for data only, no API keys needed
         self.data_fetcher = BinanceDataFetcher()
         
+        # Initialize advanced components if enabled
+        self.use_advanced_indicators = config.get('use_advanced_indicators', False)
+        self.use_multi_timeframe = config.get('use_multi_timeframe', False)
+        
+        if self.use_multi_timeframe:
+            timeframes = config.get('timeframes', ['5m', '15m', '1h', '4h'])
+            from app.analysis.multi_timeframe import MultiTimeframeAnalyzer
+            self.multi_timeframe_analyzer = MultiTimeframeAnalyzer(self.data_fetcher, timeframes)
+            logger.info(f"Initialized Multi-Timeframe Analyzer with timeframes: {timeframes}")
+        else:
+            self.multi_timeframe_analyzer = None
+        
         if config.get('llm_api_key'):
+            from app.analysis.llm import LLMAnalyzer
             self.llm_analyzer = LLMAnalyzer(llm_api_key=config.get('llm_api_key'))
         else:
             self.llm_analyzer = None
@@ -51,6 +66,10 @@ class TradingBot:
         self.last_signal_time = None
         
         logger.info(f"Trading Bot initialized for {self.symbol} on {self.timeframe} timeframe")
+        if self.use_advanced_indicators:
+            logger.info("Using advanced technical indicators")
+        if self.use_multi_timeframe:
+            logger.info("Using multi-timeframe analysis")
     
     def fetch_and_analyze(self) -> Tuple[pd.DataFrame, Dict, str]:
         """
@@ -62,42 +81,109 @@ class TradingBot:
         # Calculate start date based on lookback days
         start_date = (datetime.datetime.now() - datetime.timedelta(days=self.lookback_days)).strftime('%Y-%m-%d')
         
-        # Fetch historical data
+        # Fetch historical data for primary timeframe
         df = self.data_fetcher.get_historical_klines(
             symbol=self.symbol,
             interval=self.timeframe,
             start_time=start_date
         )
         
-        # Add technical indicators
-        df = TechnicalAnalyzer.add_indicators(df)
-        
-        # Detect breakouts
-        df = TechnicalAnalyzer.detect_breakouts(df)
+        # Add technical indicators based on configuration
+        if self.use_advanced_indicators:
+            try:
+                from app.analysis.advanced_technical import AdvancedTechnicalAnalyzer
+                df = AdvancedTechnicalAnalyzer.add_all_indicators(df)
+                df = AdvancedTechnicalAnalyzer.detect_advanced_breakouts(df)
+                logger.info("Applied advanced technical indicators")
+            except Exception as e:
+                logger.error(f"Error applying advanced indicators, falling back to standard: {e}")
+                df = TechnicalAnalyzer.add_indicators(df)
+                df = TechnicalAnalyzer.detect_breakouts(df)
+        else:
+            df = TechnicalAnalyzer.add_indicators(df)
+            df = TechnicalAnalyzer.detect_breakouts(df)
         
         # Get current price
         current_price = self.data_fetcher.get_live_price(self.symbol)
         
+        # Get multi-timeframe analysis if enabled
+        multi_timeframe_analysis = None
+        if self.use_multi_timeframe and self.multi_timeframe_analyzer:
+            try:
+                _, multi_timeframe_analysis = self.multi_timeframe_analyzer.get_multi_timeframe_analysis(
+                    self.symbol, self.lookback_days
+                )
+                logger.info(f"Multi-timeframe analysis signal: {multi_timeframe_analysis.get('signal', 'N/A')} "
+                          f"with {multi_timeframe_analysis.get('confidence', 0):.2f}% confidence")
+            except Exception as e:
+                logger.error(f"Error performing multi-timeframe analysis: {e}")
+                multi_timeframe_analysis = None
+        
         # Determine signal from technical indicators
         last_row = df.iloc[-1]
-        if last_row['long_signal'] == 1:
-            tech_signal = "LONG"
-        elif last_row['short_signal'] == 1:
-            tech_signal = "SHORT"
+        
+        if self.use_advanced_indicators and 'advanced_long_signal' in df.columns:
+            if last_row['advanced_long_signal'] == 1:
+                tech_signal = "LONG"
+            elif last_row['advanced_short_signal'] == 1:
+                tech_signal = "SHORT"
+            else:
+                tech_signal = "NEUTRAL"
         else:
-            tech_signal = "NEUTRAL"
+            if last_row['long_signal'] == 1:
+                tech_signal = "LONG"
+            elif last_row['short_signal'] == 1:
+                tech_signal = "SHORT"
+            else:
+                tech_signal = "NEUTRAL"
         
         # Get LLM analysis if available
         if self.llm_analyzer:
-            # Prepare data for LLM
-            csv_data = TechnicalAnalyzer.prepare_data_for_llm(df)
+            try:
+                # Prepare data for LLM
+                if self.use_advanced_indicators:
+                    try:
+                        from app.analysis.advanced_technical import AdvancedTechnicalAnalyzer
+                        csv_data = AdvancedTechnicalAnalyzer.prepare_advanced_data_for_llm(df)
+                    except Exception as e:
+                        logger.error(f"Error preparing advanced data for LLM: {e}")
+                        csv_data = TechnicalAnalyzer.prepare_data_for_llm(df)
+                else:
+                    csv_data = TechnicalAnalyzer.prepare_data_for_llm(df)
 
-            # Get LLM analysis
-            llm_analysis = self.llm_analyzer.analyze_market_data(
-                csv_data=csv_data,
-                current_price=current_price,
-                timeframe=self.timeframe
-            )
+                # Add multi-timeframe data if available
+                multi_timeframe_summary = ""
+                if self.use_multi_timeframe and multi_timeframe_analysis and self.multi_timeframe_analyzer:
+                    try:
+                        multi_timeframe_summary = self.multi_timeframe_analyzer.prepare_multi_timeframe_summary_for_llm(
+                            multi_timeframe_analysis
+                        )
+                        logger.info("Added multi-timeframe analysis to LLM input")
+                    except Exception as e:
+                        logger.error(f"Error preparing multi-timeframe summary for LLM: {e}")
+                        multi_timeframe_summary = ""
+
+                # Get LLM analysis with combined data
+                llm_analysis = self.llm_analyzer.analyze_market_data(
+                    csv_data=csv_data,
+                    current_price=current_price,
+                    timeframe=self.timeframe,
+                    multi_timeframe_data=multi_timeframe_summary if multi_timeframe_summary else None
+                )
+            except Exception as e:
+                logger.error(f"Error getting LLM analysis: {e}")
+                # Create a basic analysis as fallback
+                llm_analysis = {
+                    "market_condition": "Error retrieving LLM analysis",
+                    "signal": tech_signal,
+                    "confidence": 50 if tech_signal != "NEUTRAL" else 0,
+                    "support_levels": [df['low'].tail(20).min() * 0.99],
+                    "resistance_levels": [df['high'].tail(20).max() * 1.01],
+                    "stop_loss": current_price * 0.95 if tech_signal == "LONG" else current_price * 1.05,
+                    "take_profit": [current_price * 1.05] if tech_signal == "LONG" else [current_price * 0.95],
+                    "risk_reward_ratio": 1.0,
+                    "reasoning": f"Based on technical indicators (LLM analysis failed: {e})"
+                }
         else:
             # Create a basic analysis without LLM
             llm_analysis = {
@@ -112,19 +198,44 @@ class TradingBot:
                 "reasoning": "Based on technical indicators only (LLM analysis not available)"
             }
         
-        # Final signal determination (combining technical and LLM signals)
-        if tech_signal != "NEUTRAL" and llm_analysis['signal'] == tech_signal:
-            # Strong signal when both technical and LLM agree
-            final_signal = tech_signal
-        elif tech_signal != "NEUTRAL" and llm_analysis['confidence'] < 50:
-            # Technical signal overrides low-confidence LLM
-            final_signal = tech_signal
-        elif llm_analysis['confidence'] > 70:
-            # High-confidence LLM signal
-            final_signal = llm_analysis['signal']
+        # Final signal determination
+        if self.use_multi_timeframe and multi_timeframe_analysis:
+            # Use multi-timeframe analysis as a filter
+            mt_signal = multi_timeframe_analysis.get('signal', 'NEUTRAL')
+            mt_confidence = multi_timeframe_analysis.get('confidence', 0)
+            
+            if tech_signal != "NEUTRAL" and mt_signal == tech_signal:
+                # Strong signal when both technical and multi-timeframe agree
+                final_signal = tech_signal
+                # Increase LLM confidence when all three agree
+                if llm_analysis['signal'] == tech_signal:
+                    llm_analysis['confidence'] = min(100, llm_analysis['confidence'] * 1.2)
+            elif tech_signal != "NEUTRAL" and mt_confidence < 60:
+                # Technical signal overrides low-confidence multi-timeframe
+                final_signal = tech_signal
+            elif mt_confidence > 80:
+                # High-confidence multi-timeframe signal
+                final_signal = mt_signal
+            elif llm_analysis['confidence'] > 70:
+                # High-confidence LLM signal
+                final_signal = llm_analysis['signal']
+            else:
+                # Default to NEUTRAL if no strong signal
+                final_signal = "NEUTRAL"
         else:
-            # Default to NEUTRAL if no strong signal
-            final_signal = "NEUTRAL"
+            # Original logic without multi-timeframe
+            if tech_signal != "NEUTRAL" and llm_analysis['signal'] == tech_signal:
+                # Strong signal when both technical and LLM agree
+                final_signal = tech_signal
+            elif tech_signal != "NEUTRAL" and llm_analysis['confidence'] < 50:
+                # Technical signal overrides low-confidence LLM
+                final_signal = tech_signal
+            elif llm_analysis['confidence'] > 70:
+                # High-confidence LLM signal
+                final_signal = llm_analysis['signal']
+            else:
+                # Default to NEUTRAL if no strong signal
+                final_signal = "NEUTRAL"
         
         return df, llm_analysis, final_signal
     
@@ -167,6 +278,8 @@ class TradingBot:
                 
                 # Update last signal
                 self.last_signal = llm_signal
+                self.last_signal_price = current_price
+                self.last_signal_time = datetime.datetime.now()
                 
                 # Save signal data for reference
                 self.save_signal_data(df, llm_analysis, llm_signal, current_price)
@@ -214,38 +327,65 @@ class TradingBot:
             
         logger.info(f"Saved signal data to signals/signal_data_{timestamp}.csv")
     
-    def run_continuous(self, interval_minutes: int = 15):
+    def run_continuous(self, interval_seconds=900):
         """
         Run the bot continuously with a specified check interval
         
         Args:
-            interval_minutes: Interval between checks in minutes
+            interval_seconds: Interval between checks in seconds (default: 15 minutes)
         """
+        # Format interval for display
+        if interval_seconds < 60:
+            display_interval = f"{interval_seconds} seconds"
+        elif interval_seconds < 3600:
+            minutes = interval_seconds / 60
+            display_interval = f"{minutes:.1f} minute{'s' if minutes != 1 else ''}"
+        else:
+            hours = interval_seconds / 3600
+            display_interval = f"{hours:.1f} hour{'s' if hours != 1 else ''}"
+        
         console.print(Panel.fit(
             "[bold blue]Bitcoin Trading Signal Bot[/bold blue]\n\n"
             f"[bold]Symbol:[/bold] {self.symbol}\n"
             f"[bold]Timeframe:[/bold] {self.timeframe}\n"
-            f"[bold]Check Interval:[/bold] Every {interval_minutes} minutes\n",
+            f"[bold]Check Interval:[/bold] Every {display_interval}\n",
             title="Starting Bot", border_style="green"
         ))
         
-        # Schedule regular checks
-        schedule.every(interval_minutes).minutes.do(self.check_for_signals)
-        
-        # Run initial check immediately
-        self.check_for_signals()
-        
-        # Keep running
-        while True:
-            try:
-                schedule.run_pending()
-                time.sleep(1)
-            except KeyboardInterrupt:
-                logger.info("Bot stopped by user")
-                break
-            except Exception as e:
-                logger.error(f"Error in main loop: {e}")
-                time.sleep(60)  # Wait a minute before trying again
+        # Run based on interval type
+        if interval_seconds < 60:
+            # For intervals less than a minute, use direct loop
+            self.check_for_signals()  # Initial check
+            
+            while True:
+                try:
+                    time.sleep(interval_seconds)
+                    self.check_for_signals()
+                except KeyboardInterrupt:
+                    logger.info("Bot stopped by user")
+                    break
+                except Exception as e:
+                    logger.error(f"Error in main loop: {e}")
+                    time.sleep(60)  # Wait a minute before trying again
+        else:
+            # For intervals of a minute or more, use schedule library
+            minutes = interval_seconds / 60
+            schedule.every(minutes).minutes.do(self.check_for_signals)
+            
+            # Run initial check immediately
+            self.check_for_signals()
+            
+            # Keep running
+            while True:
+                try:
+                    schedule.run_pending()
+                    time.sleep(1)
+                except KeyboardInterrupt:
+                    logger.info("Bot stopped by user")
+                    break
+                except Exception as e:
+                    logger.error(f"Error in main loop: {e}")
+                    time.sleep(60)  # Wait a minute before trying again
     
     def run_backtest(self, start_date: str, end_date: str = None):
         """
@@ -274,11 +414,19 @@ class TradingBot:
             end_time=end_date
         )
         
-        # Add technical indicators
-        df = TechnicalAnalyzer.add_indicators(df)
-        
-        # Detect breakouts
-        df = TechnicalAnalyzer.detect_breakouts(df)
+        # Add technical indicators based on configuration
+        if self.use_advanced_indicators:
+            try:
+                from app.analysis.advanced_technical import AdvancedTechnicalAnalyzer
+                df = AdvancedTechnicalAnalyzer.add_all_indicators(df)
+                df = AdvancedTechnicalAnalyzer.detect_advanced_breakouts(df)
+            except Exception as e:
+                logger.error(f"Error applying advanced indicators in backtest, falling back to standard: {e}")
+                df = TechnicalAnalyzer.add_indicators(df)
+                df = TechnicalAnalyzer.detect_breakouts(df)
+        else:
+            df = TechnicalAnalyzer.add_indicators(df)
+            df = TechnicalAnalyzer.detect_breakouts(df)
         
         # Initialize backtest metrics
         trades = []
@@ -291,7 +439,15 @@ class TradingBot:
             
             # Check for entry signals
             if current_position is None:  # Not in a position
-                if row['long_signal'] == 1:
+                # Determine which signal column to use based on available columns
+                if self.use_advanced_indicators and 'advanced_long_signal' in df.columns:
+                    long_signal_col = 'advanced_long_signal'
+                    short_signal_col = 'advanced_short_signal'
+                else:
+                    long_signal_col = 'long_signal'
+                    short_signal_col = 'short_signal'
+                
+                if row[long_signal_col] == 1:
                     current_position = "LONG"
                     entry_price = row['close']
                     trades.append({
@@ -302,7 +458,7 @@ class TradingBot:
                         'exit_price': None,
                         'profit_pct': None
                     })
-                elif row['short_signal'] == 1:
+                elif row[short_signal_col] == 1:
                     current_position = "SHORT"
                     entry_price = row['close']
                     trades.append({
