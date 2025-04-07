@@ -54,8 +54,8 @@ class TradingBot:
             self.multi_timeframe_analyzer = None
         
         if config.get('llm_api_key'):
-            from app.analysis.llm import LLMAnalyzer
-            self.llm_analyzer = LLMAnalyzer(llm_api_key=config.get('llm_api_key'))
+            from app.analysis.enhanced_llm  import EnhancedLLMAnalyzer
+            self.llm_analyzer = EnhancedLLMAnalyzer(llm_api_key=config.get('llm_api_key'))
         else:
             self.llm_analyzer = None
             logger.warning("LLM Analyzer not initialized - missing API key")
@@ -74,6 +74,7 @@ class TradingBot:
     def fetch_and_analyze(self) -> Tuple[pd.DataFrame, Dict, str]:
         """
         Fetch latest data, perform technical analysis, and get LLM insights
+        with enhanced reversal detection
         
         Returns:
             Tuple of (analyzed_df, llm_analysis, signal)
@@ -102,6 +103,14 @@ class TradingBot:
         else:
             df = TechnicalAnalyzer.add_indicators(df)
             df = TechnicalAnalyzer.detect_breakouts(df)
+            
+        # Add reversal detection indicators
+        try:
+            from app.analysis.reversal_detection import ReversalDetector
+            df = ReversalDetector.add_reversal_indicators(df)
+            logger.info("Added reversal detection indicators")
+        except ImportError:
+            logger.warning("Reversal detection module not found, continuing without reversal checks")
         
         # Get current price
         current_price = self.data_fetcher.get_live_price(self.symbol)
@@ -114,7 +123,7 @@ class TradingBot:
                     self.symbol, self.lookback_days
                 )
                 logger.info(f"Multi-timeframe analysis signal: {multi_timeframe_analysis.get('signal', 'N/A')} "
-                          f"with {multi_timeframe_analysis.get('confidence', 0):.2f}% confidence")
+                        f"with {multi_timeframe_analysis.get('confidence', 0):.2f}% confidence")
             except Exception as e:
                 logger.error(f"Error performing multi-timeframe analysis: {e}")
                 multi_timeframe_analysis = None
@@ -136,6 +145,28 @@ class TradingBot:
                 tech_signal = "SHORT"
             else:
                 tech_signal = "NEUTRAL"
+        
+        # Check for reversals based on previous signal and current conditions
+        reversal_detected = False
+        reversal_signal = tech_signal
+        reversal_confidence = 0
+        
+        try:
+            if hasattr(self, 'last_signal') and self.last_signal in ["LONG", "SHORT"]:
+                from app.analysis.reversal_detection import ReversalDetector
+                reversal_detected, reversal_signal, reversal_confidence = ReversalDetector.check_for_reversals(
+                    df, self.last_signal, min_reversal_strength=2
+                )
+                
+                if reversal_detected:
+                    logger.info(f"Reversal detected: {self.last_signal} → {reversal_signal} "
+                            f"with {reversal_confidence:.2f}% confidence")
+                    
+                    # Override technical signal if strong reversal
+                    if reversal_confidence > 60:
+                        tech_signal = reversal_signal
+        except Exception as e:
+            logger.error(f"Error checking for reversals: {e}")
         
         # Get LLM analysis if available
         if self.llm_analyzer:
@@ -162,6 +193,19 @@ class TradingBot:
                     except Exception as e:
                         logger.error(f"Error preparing multi-timeframe summary for LLM: {e}")
                         multi_timeframe_summary = ""
+                        
+                # Add reversal information for LLM if detected
+                reversal_info = ""
+                if reversal_detected:
+                    reversal_info = (
+                        f"\n\nIMPORTANT REVERSAL SIGNAL DETECTED:\n"
+                        f"Previous signal: {self.last_signal}\n"
+                        f"Reversal direction: {reversal_signal}\n"
+                        f"Reversal confidence: {reversal_confidence:.2f}%\n"
+                        f"Recent price action suggests a potential trend reversal. "
+                        f"Please consider this in your analysis."
+                    )
+                    multi_timeframe_summary += reversal_info
 
                 # Get LLM analysis with combined data
                 llm_analysis = self.llm_analyzer.analyze_market_data(
@@ -170,6 +214,17 @@ class TradingBot:
                     timeframe=self.timeframe,
                     multi_timeframe_data=multi_timeframe_summary if multi_timeframe_summary else None
                 )
+                
+                # Adjust LLM confidence if strong reversal detected
+                if reversal_detected and reversal_confidence > 70:
+                    if (reversal_signal == "NEUTRAL" and llm_analysis['signal'] != "NEUTRAL") or \
+                    (reversal_signal != "NEUTRAL" and llm_analysis['signal'] != reversal_signal):
+                        # Reduce confidence in the LLM signal if contradicting a strong reversal
+                        llm_analysis['confidence'] = max(20, llm_analysis['confidence'] * 0.7)
+                        llm_analysis['reasoning'] += (
+                            f" However, recent price action suggests a potential {reversal_signal.lower()} "
+                            f"reversal with {reversal_confidence:.2f}% confidence, so caution is advised."
+                        )
             except Exception as e:
                 logger.error(f"Error getting LLM analysis: {e}")
                 # Create a basic analysis as fallback
@@ -198,8 +253,11 @@ class TradingBot:
                 "reasoning": "Based on technical indicators only (LLM analysis not available)"
             }
         
-        # Final signal determination
-        if self.use_multi_timeframe and multi_timeframe_analysis:
+        # Final signal determination with reversal awareness
+        if reversal_detected and reversal_confidence > 70:
+            # Strong reversal signal overrides other signals
+            final_signal = reversal_signal
+        elif self.use_multi_timeframe and multi_timeframe_analysis:
             # Use multi-timeframe analysis as a filter
             mt_signal = multi_timeframe_analysis.get('signal', 'NEUTRAL')
             mt_confidence = multi_timeframe_analysis.get('confidence', 0)
@@ -236,6 +294,15 @@ class TradingBot:
             else:
                 # Default to NEUTRAL if no strong signal
                 final_signal = "NEUTRAL"
+        
+        # Add reversal information to LLM analysis for display
+        if reversal_detected:
+            if 'reasoning' in llm_analysis:
+                llm_analysis['reasoning'] = f"REVERSAL ALERT: Previous {self.last_signal} trend showing signs of reversal. " + llm_analysis['reasoning']
+            
+            # Add reversal info to market condition
+            if 'market_condition' in llm_analysis:
+                llm_analysis['market_condition'] = f"Potential reversal from {self.last_signal} trend. " + llm_analysis['market_condition']
         
         return df, llm_analysis, final_signal
     

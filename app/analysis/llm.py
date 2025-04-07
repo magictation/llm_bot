@@ -36,7 +36,8 @@ class LLMAnalyzer:
         # Initialize Google AI client
         genai.configure(api_key=api_key)
         # Use the gemma-3-27b-it model
-        self.model_name = "gemma-3-27b-it"
+        # self.model_name = "gemma-3-27b-it"
+        self.model_name = "gemini-2.0-flash"
         logger.info(f"Initialized LLM Analyzer with model: {self.model_name}")
     
     def prepare_summary_data(self, df):

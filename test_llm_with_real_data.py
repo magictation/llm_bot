@@ -235,7 +235,9 @@ The JSON should only contain these fields and be properly formatted.
         start_time = time.time()
         
         # Create the model - Using gemma-3-27b-it model
-        model = genai.GenerativeModel(model_name="gemma-3-27b-it")
+        # model = genai.GenerativeModel(model_name="gemma-3-27b-it")
+        # model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+        model = genai.GenerativeModel(model_name="gemini-2.0-flash")
         
         # Generate content
         response = model.generate_content(prompt)
